@@ -229,9 +229,20 @@ let covmanager = new Vue({
     apiurl: function() {
       let url = APIURL + this.path;
 
+      let query_params = []
+
       let ids = pmanager.get_value("ids")
       if (ids) {
-        url += "?ids=" + ids
+        query_params.push("ids=" + ids)
+      }
+
+      let rc = pmanager.get_value("rc")
+      if (rc) {
+        query_params.push("rc=" + rc)
+      }
+
+      if (query_params.length > 0) {
+        url += "?" + query_params.join("&")
       }
 
       return url;

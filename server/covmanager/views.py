@@ -12,7 +12,7 @@ from wsgiref.util import FileWrapper
 
 from server.views import JsonQueryFilterBackend, SimpleQueryFilterBackend
 
-from .models import Collection, Repository
+from .models import Collection, Repository, ReportConfiguration
 from .serializers import CollectionSerializer, RepositorySerializer
 from .tasks import aggregate_coverage_data
 from crashmanager.models import Tool
@@ -67,7 +67,11 @@ def collections_browse_api(request, collectionid, path):
             status=204
         )
 
-    coverage = collection.subset(path)
+    report_configuration = None
+    if "rc" in request.GET:
+        report_configuration = get_object_or_404(ReportConfiguration, pk=request.GET["rc"])
+
+    coverage = collection.subset(path, report_configuration)
 
     if not coverage:
         raise Http404("Path not found.")

@@ -9,6 +9,7 @@ import codecs
 import json
 
 from crashmanager.models import Client, Tool
+from FTB import CoverageHelper
 
 if getattr(settings, 'USE_CELERY', None):
     from .tasks import check_revision_update
@@ -87,7 +88,7 @@ class Collection(models.Model):
         provider = self.repository.getInstance()
         coverage["source"] = provider.getSource(path, self.revision)
 
-    def subset(self, path):
+    def subset(self, path, report_configuration=None):
         """
         Calculate a subset of the coverage stored in this collection
         based on the given path.
@@ -107,7 +108,12 @@ class Collection(models.Model):
         if not self.content:
             self.loadCoverage()
 
-        ret = self.content["children"]
+        if report_configuration is not None:
+            from datetime import datetime
+            s1 = datetime.now()
+            report_configuration.apply(self.content)
+            s2 = datetime.now()
+            print("Elapsed: %s" % (s2 - s1).total_seconds())
 
         names = [x for x in path.split("/") if x != ""]
 
@@ -116,6 +122,7 @@ class Collection(models.Model):
             return self.content
 
         try:
+            ret = self.content["children"]
             for name in names[:-1]:
                 ret = ret[name]["children"]
             ret = ret[names[-1]]
@@ -183,3 +190,18 @@ if getattr(settings, 'USE_CELERY', None):
     @receiver(post_save, sender=Collection)
     def Collection_save(sender, instance, **kwargs):
         check_revision_update.delay(instance.pk)
+
+
+class ReportConfiguration(models.Model):
+    description = models.CharField(max_length=1023, blank=True)
+    repository = models.ForeignKey(Repository)
+    directives = models.TextField()
+    public = models.BooleanField(blank=False, default=False)
+
+    def apply(self, collection):
+        from datetime import datetime
+        s1 = datetime.now()
+        CoverageHelper.apply_include_exclude_directives(collection, self.directives.splitlines())
+        s2 = datetime.now()
+        print("apply_include_exclude_directives elapsed: %s" % (s2 - s1).total_seconds())
+        CoverageHelper.calculate_summary_fields(collection)
