@@ -203,38 +203,49 @@ def apply_include_exclude_directives(node, directives):
         if not _is_dir(node):
             return
 
-        # run directives on files
         #print("\tdirectives = [ " +
         #      ", ".join(w + ":" + "/".join("**" if d == "**" else d.pattern for d in p) for (w, p) in directives) +
         #      "]")
+
+        # separate out files from dirs
+        original_files = []
+        original_dirs = []
+        for child in node["children"]:
+            if _is_dir(node["children"][child]):
+                original_dirs.append(child)
+            else:
+                original_files.append(child)
+
+        # run directives on files
         files = set()
         for what, parts in directives:
-            if len(parts) != 1:
-                # this means there is still a "/" in the pattern, and it shouldn't be applied to files in this subtree
+            pattern, subtree_pattern = parts[0], parts[1:]
+
+            # there is still a "/" in the pattern, so it shouldn't be applied to files at this point
+            if subtree_pattern:
                 continue
+
             if what == "+":
-                if parts[0] == "**":
-                    files = {child for child in node["children"] if not _is_dir(node["children"][child])}
+                if pattern == "**":
+                    files = set(original_files)
                 else:
-                    files |= {child for child in node["children"] if (not _is_dir(node["children"][child]) and
-                                                                      parts[0].match(child) is not None)}
+                    files |= {child for child in original_files if pattern.match(child) is not None}
             else:  # what == "-"
-                if parts[0] == "**":
+                if pattern == "**":
                     files = set()
                 else:
-                    files = {child for child in files if parts[0].match(child) is None}
+                    files = {child for child in files if pattern.match(child) is None}
 
         # run directives on dirs
         universal_directives = []  # patterns beginning with **/ should always be applied recursively
         dirs = {}
         for what, parts in directives:
-            if len(parts) == 1 and parts[0] != "**":
-                continue
+            pattern, subtree_pattern = parts[0], parts[1:]
 
-            if parts[0] == "**":
+            if pattern == "**":
                 # ** is unique in that it applies to both files and directories at every level
                 # it is also the only pattern that can remove a directory from recursion
-                if len(parts) > 1:
+                if subtree_pattern:
                     universal_directives.append((what, parts))
                 else:
                     # +:** or -:** means it doesn't matter what preceded this,
@@ -244,32 +255,32 @@ def apply_include_exclude_directives(node, directives):
                     # this is a unique case, so handle it separately
                     # it will either reset dirs to all directory children of the current node, or clear dirs
                     if what == "+":
-                        dirs = {child: [(what, parts)]
-                                for child in node["children"]
-                                if _is_dir(node["children"][child])}
+                        dirs = {child: [(what, parts)] for child in original_dirs}
                     else:  # what == "-"
                         dirs = {}
                     continue
 
-            # len(parts) > 1, because of the continue above, only recursive patterns are left
+            # ** is the only case we care about that is not a subtree pattern, and it was already handled above
+            if not subtree_pattern:
+                continue
+
             if what == "+":
-                for child in node["children"]:
-                    if not _is_dir(node["children"][child]):
-                        continue
-                    pattern_matches = (parts[0] == "**" or parts[0].match(child) is not None)
-                    if pattern_matches:
+                for child in original_dirs:
+                    if pattern == "**" or pattern.match(child) is not None:
                         if child not in dirs:
                             dirs[child] = universal_directives[:]
-                        dirs[child].append((what, parts[1:]))
+                        elif pattern == "**":
+                            dirs[child].append((what, parts))
+                        dirs[child].append((what, subtree_pattern))
             else:  # what == "-"
                 for child in dirs:
-                    if parts[0] == "**":
+                    if pattern == "**":
                         dirs[child].append((what, parts))
-                    if parts[0] == "**" or parts[0].match(child) is not None:
-                        dirs[child].append((what, parts[1:]))
+                    if pattern == "**" or pattern.match(child) is not None:
+                        dirs[child].append((what, subtree_pattern))
 
-            if parts[0] == "**":
-                universal_directives.append((what, parts[1:]))
+            if pattern == "**":
+                universal_directives.append((what, subtree_pattern))
 
         # filters are applied, now remove/recurse for each child
         for child in list(node["children"]):  # make a copy since elements will be removed during iteration
