@@ -167,30 +167,15 @@ class TestCoverageHelperFlattenNames(unittest.TestCase):
         self.assertEqual(result, set(expected_names))
 
 
-class TestCoverageHelperRemoveNames(unittest.TestCase):
-    def runTest(self):
-        node = json.loads(covdata)
-
-        CoverageHelper.remove_names(node, ['topdir2', 'topdir1/subdir2/file3.c', 'topdir2/subdir2'])
-
-        result = CoverageHelper.get_flattened_names(node, prefix="")
-
-        expected_names = [
-            'topdir1',
-            'topdir1/subdir1/file2.c',
-            'topdir1/subdir1',
-            'topdir1/subdir1/file1.c',
-        ]
-
-        self.assertEqual(result, set(expected_names))
-
-
 class TestCoverageHelperApplyDirectivesMixed(unittest.TestCase):
     def runTest(self):
         node = json.loads(covdata)
 
         # Check that mixed directives work properly (exclude multiple paths, include some back)
-        directives = ["-:topdir1/subdir1/.*", "+:topdir1/subdir./file(1|3)\.c", "-:topdir1/subdir2.*"]
+        directives = ["-:topdir1/subdir1/**",
+                      "+:topdir1/subdir?/file1.c",
+                      "+:topdir1/subdir?/file3.c",
+                      "-:topdir1/subdir2/**"]
 
         CoverageHelper.apply_include_exclude_directives(node, directives)
 
@@ -213,7 +198,7 @@ class TestCoverageHelperApplyDirectivesPrune(unittest.TestCase):
         node = json.loads(covdata)
 
         # Check that any empty childs are pruned (empty childs are not useful)
-        directives = ["-:topdir1/subdir1/.*", "-:topdir1/subdir2/.*"]
+        directives = ["-:topdir1/subdir1/**", "-:topdir1/subdir2/**"]
 
         CoverageHelper.apply_include_exclude_directives(node, directives)
 
@@ -233,7 +218,7 @@ class TestCoverageHelperApplyDirectivesExcludeAll(unittest.TestCase):
         node = json.loads(covdata)
 
         # Check that excluding all paths works (specialized case)
-        directives = ["-:.*", "+:topdir2/subdir1/.*"]
+        directives = ["-:**", "+:topdir2/subdir1/**"]
 
         CoverageHelper.apply_include_exclude_directives(node, directives)
 
@@ -253,7 +238,7 @@ class TestCoverageHelperApplyDirectivesMakeEmpty(unittest.TestCase):
         node = json.loads(covdata)
 
         # Check that making the set entirely empty doesn't crash things (tsmith mode)
-        directives = ["-:.*"]
+        directives = ["-:**"]
 
         CoverageHelper.apply_include_exclude_directives(node, directives)
 

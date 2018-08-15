@@ -145,156 +145,148 @@ def calculate_summary_fields(node, name=None):
 def apply_include_exclude_directives(node, directives):
     """
     Applies the given include and exclude directives to the given nodeself.
-
     Directives either start with a + or a - for include or exclude, followed
-    by a colon and a regular expression. The regular expression must match the
+    by a colon and a glob expression. The glob expression must match the
     full path of the file(s) or dir(s) to include or exclude. All slashes in paths
-    are forward slashes, must not have a trailing slash and special regex characters
-    must be escaped by backslash.
-
+    are forward slashes, must not have a trailing slash and glob characters
+    are not allowed. ** is additionally supported for recursive directory matching.
     @param node: The coverage node to modify, in server-side recursive format
     @type node: dict
-
     @param directives: The directives to apply
     @type directives: list(str)
-
     This method modifies the node in-place, nothing is returned.
-
     IMPORTANT: This method does *not* recalculate any total/summary fields.
                You *must* call L{calculate_summary_fields} after applying
                this function one or more times to ensure correct results.
     """
-    # Flatten all names in node
-    from datetime import datetime
-    s1 = datetime.now()
-    names = get_flattened_names(node)
-    s2 = datetime.now()
-    print("get_flattened_names elapsed: %s" % (s2 - s1).total_seconds())
 
-    names_to_remove = set()
-
-    s1 = datetime.now()
-
-    # Apply directives to names to determine name delection list
+    # Pre-process the directives
+    #
+    # all directives become a tuple of their "/" separated parts
+    #
+    # there are only two base-cases:
+    #  <directive> ::= "**"
+    #                | pattern
+    #                | <directive> "/" <directive>
+    #
+    # ** are left as a string
+    # patterns are converted to regex and compile
+    directives_new = [("+", ["**"])]  # start with an implicit +:** so we don't have to handle the empty case
     for directive in directives:
-        (what, regex) = directive.split(":", 2)
-
-        if what == '+':
-            cre = re.compile(regex)
-            keep = set()
-            for name in names_to_remove:
-                if cre.match(name):
-                    keep.add(name)
-
-            # Remove any names we want to keep
-            names_to_remove -= keep
-
-            # We also need to remove any names that are prefix of what we want to keep
-            prefix_keep = set()
-            for name in names_to_remove:
-                for keep_name in keep:
-                    if keep_name.startswith(name + "/"):
-                        prefix_keep.add(name)
-            names_to_remove -= prefix_keep
-
-        elif what == '-':
-            if regex == '.*' or regex == '.+':
-                # Special-case the exclude all pattern for performance
-                names_to_remove.update(names)
+        if ":" not in directive:
+            raise RuntimeError("malformed directive: " + repr(directive))
+        what, pattern = directive.split(":", 1)
+        if what not in "+-":
+            raise RuntimeError("Unexpected directive prefix: " + what)
+        parts = []
+        for part in pattern.split("/"):
+            if part == "**":
+                parts.append(part)
+            elif "**" in part:
+                # although this is technically still a valid glob, raise an error since ** has special meaning
+                # and this probably indicates a misunderstanding of what it will do
+                # (functionally, ** == * if it was left in)
+                raise RuntimeError("** cannot be used in an expression")
             else:
-                cre = re.compile(regex)
-                for name in names:
-                    if cre.match(name):
-                        names_to_remove.add(name)
-        else:
-            raise RuntimeError("Unexpected directive prefix: %s" % what)
+                # escape regex characters
+                part = re.escape(part) + "$"  # add $ so whole pattern must match
+                # convert glob pattern to regex
+                part = part.replace("\\*", ".*").replace("\\?", ".")
+                # compile the resulting regex
+                parts.append(re.compile(part))
+        directives_new.append((what, parts))
 
-    s2 = datetime.now()
-    print("applying elapsed: %s" % (s2 - s1).total_seconds())
+    def _is_dir(node):
+        return "children" in node
 
-    s1 = datetime.now()
-    remove_names(node, names_to_remove)
-    s2 = datetime.now()
-    print("remove_names elapsed: %s" % (s2 - s1).total_seconds())
-
-
-def remove_names(node, names):
-    """
-    Removes the given names (paths) from the given node.
-
-    All slashes in paths are forward slashes and must not have a trailing
-    slash.
-
-    @param node: The coverage node to modify, in server-side recursive format
-    @type node: dict
-
-    @param names: The names (paths) to remove
-    @type names: list(str)
-
-    This method modifies the node in-place, nothing is returned.
-
-    IMPORTANT: This method does *not* recalculate any total/summary fields.
-               You *must* call L{calculate_summary_fields} after applying
-               this function one or more times to ensure correct results.
-    """
-    def remove_name(node, name):
-        current_node = node
-        current_name = []
-        current_name.extend(name[:-1])
-
-        while current_name:
-            if "children" not in current_node:
-                return
-
-            current_name_first = current_name.pop(0)
-
-            if current_name_first not in current_node["children"]:
-                return
-
-            current_node = current_node["children"][current_name_first]
-
-        if "children" not in current_node or name[-1] not in current_node["children"]:
+    def __apply_include_exclude_directives(node, directives):
+        if not _is_dir(node):
             return
 
-        del current_node["children"][name[-1]]
-
-        def recurse_prune(node, name, idx):
-            if "children" in node:
-                if not node["children"]:
-                    # Empty non-leaf
-                    return True
+        # run directives on files
+        #print("\tdirectives = [ " +
+        #      ", ".join(w + ":" + "/".join("**" if d == "**" else d.pattern for d in p) for (w, p) in directives) +
+        #      "]")
+        files = set()
+        for what, parts in directives:
+            if len(parts) != 1:
+                # this means there is still a "/" in the pattern, and it shouldn't be applied to files in this subtree
+                continue
+            if what == "+":
+                if parts[0] == "**":
+                    files = {child for child in node["children"] if not _is_dir(node["children"][child])}
                 else:
-                    if idx >= len(name) or name[idx] not in node["children"]:
-                        return False
+                    files |= {child for child in node["children"] if (not _is_dir(node["children"][child]) and
+                                                                      parts[0].match(child) is not None)}
+            else:  # what == "-"
+                if parts[0] == "**":
+                    files = set()
+                else:
+                    files = {child for child in files if parts[0].match(child) is None}
 
-                    # Recurse. If we prune in recursion, check if our child is now empty
-                    if recurse_prune(node["children"][name[idx]], name, idx + 1):
-                        print("Pruning %s" % name[idx])
-                        del node["children"][name[idx]]
-                        if not node["children"]:
-                            return True
+        # run directives on dirs
+        universal_directives = []  # patterns beginning with **/ should always be applied recursively
+        dirs = {}
+        for what, parts in directives:
+            if len(parts) == 1 and parts[0] != "**":
+                continue
 
-            # We ended up with a non-empty non-leaf even after pruning, terminate algorithm
-            return False
+            if parts[0] == "**":
+                # ** is unique in that it applies to both files and directories at every level
+                # it is also the only pattern that can remove a directory from recursion
+                if len(parts) > 1:
+                    universal_directives.append((what, parts))
+                else:
+                    # +:** or -:** means it doesn't matter what preceded this,
+                    #   so ignore the existing universal_directives
+                    universal_directives = [(what, parts)]
 
-        # Perform a recursive prune along the path specified in name if we left an empty non-leaf
-        if not current_node["children"]:
-            recurse_prune(node, name, 0)
-        return
+                    # this is a unique case, so handle it separately
+                    # it will either reset dirs to all directory children of the current node, or clear dirs
+                    if what == "+":
+                        dirs = {child: [(what, parts)]
+                                for child in node["children"]
+                                if _is_dir(node["children"][child])}
+                    else:  # what == "-"
+                        dirs = {}
+                    continue
 
-    names = [name.split("/") for name in names]
-    names.sort(key=len)
+            # len(parts) > 1, because of the continue above, only recursive patterns are left
+            if what == "+":
+                for child in node["children"]:
+                    if not _is_dir(node["children"][child]):
+                        continue
+                    pattern_matches = (parts[0] == "**" or parts[0].match(child) is not None)
+                    if pattern_matches:
+                        if child not in dirs:
+                            dirs[child] = universal_directives[:]
+                        dirs[child].append((what, parts[1:]))
+            else:  # what == "-"
+                for child in dirs:
+                    if parts[0] == "**":
+                        dirs[child].append((what, parts))
+                    if parts[0] == "**" or parts[0].match(child) is not None:
+                        dirs[child].append((what, parts[1:]))
 
-    for idx in range(0, len(names)):
-        if idx >= len(names):
-            return
-        name = names[idx]
-        remove_name(node, name)
+            if parts[0] == "**":
+                universal_directives.append((what, parts[1:]))
 
-        # Optimization: Delete all other names that this one is a prefix for
-        for oidx in range(len(names) - 1, idx, -1):
-            if name == names[oidx][:len(name)]:
-                del names[oidx]
+        # filters are applied, now remove/recurse for each child
+        for child in list(node["children"]):  # make a copy since elements will be removed during iteration
+            if _is_dir(node["children"][child]):
+                if child in dirs:
+                    #print("recursing to %s/%s" % (node["name"], node["children"][child]["name"]))
+                    __apply_include_exclude_directives(node["children"][child], dirs[child])
+                    # the child is now empty, so remove it too
+                    if not node["children"][child]["children"]:
+                        del node["children"][child]
+                else:
+                    del node["children"][child]  # removing excluded subtree
+            elif child not in files:
+                del node["children"][child]  # removing excluded file
+
+    # begin recursion
+    __apply_include_exclude_directives(node, directives_new)
 
 
 def get_flattened_names(node, prefix=""):
